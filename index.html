@@ -555,14 +555,35 @@ async function callClaude(systemPrompt, userPrompt, maxTokens) {
 
   const data = await response.json();
   let txt = (data.content?.[0]?.text || '').trim();
-  // Strip markdown fences
-  txt = txt.replace(/^```[a-z]*\n?/,'').replace(/\n?```$/,'').trim();
-  const s = txt.indexOf('{'), e = txt.lastIndexOf('}');
-  if(s < 0 || e < 0) throw new Error('Réponse invalide de l\'API');
-  return JSON.parse(txt.slice(s, e+1));
+  return robustParseJSON(txt);
 }
 
-// ── TEST API ──────────────────────────────────────────────
+// ── ROBUST JSON PARSER ────────────────────────────────────
+function robustParseJSON(txt) {
+  if(!txt) throw new Error('Réponse vide');
+  // 1. Strip all markdown fences
+  txt = txt.replace(/```json/gi,'').replace(/```/g,'').trim();
+  // 2. Find outermost { }
+  const s = txt.indexOf('{');
+  const e = txt.lastIndexOf('}');
+  if(s < 0 || e < 0 || e <= s) throw new Error('Pas de JSON dans la réponse');
+  const jsonStr = txt.slice(s, e+1);
+  // 3. Try direct parse
+  try { return JSON.parse(jsonStr); } catch(err) {}
+  // 4. Try fixing common issues: trailing commas, single quotes
+  try {
+    const fixed = jsonStr
+      .replace(/,\s*([}\]])/g, '$1')  // trailing commas
+      .replace(/'/g, '"')              // single to double quotes
+      .replace(/\n/g, ' ')            // newlines
+      .replace(/\t/g, ' ');           // tabs
+    return JSON.parse(fixed);
+  } catch(err) {
+    throw new Error('JSON Parse error: ' + err.message);
+  }
+}
+
+
 async function testAPI() {
   const el = $('api-test-result');
   const key = getAPIKey();
@@ -794,17 +815,14 @@ async function generateDay(){
   $('workout-out').innerHTML=`<div class="loading"><div class="spin"></div><div class="ldtxt">Génération de ton plan personnalisé...</div></div>`;
 
   const wPrompt=isRest
-    ?`Crée une séance récupération active 20 min. JSON uniquement:
-{"coaching":"phrase courte","exercises":[{"name":"Mobilité hanche","spec":"2×60 sec — cercles lents","muscle":"glutes","series":2,"repsTarget":1,"rest":30}]}`
-    :`Coach sportif expert. Entraînement ${dayScore>=7?'intense 50 min':dayScore<=4?'léger 30 min':'modéré 40 min'} fonctionnel.
-Profil: homme ${profile.age}ans, ${profile.weight}kg, ${profile.height}cm, ingénieur (assis + bureau debout).
-Lieu: ${isHome?'HOME GYM équipement: '+equip:'GYM COMMERCIAL'}.
-Score: ${dayScore}/10 | Fatigue: ${fatigue}/10 | Stress: ${stress}/10 | Charge: ${work}.
-Muscles prioritaires (reposés): ${freshMuscles||'tous'}.
-Muscles à éviter (fatigués): ${tiredMuscles||'aucun'}.
-6-8 exercices, HIIT + force fonctionnelle, supersets.
-JSON uniquement:
-{"coaching":"phrase motivante","exercises":[{"name":"Deadlift","spec":"4×8 — dos plat, barre contre tibia","muscle":"back","series":4,"repsTarget":8,"rest":120},{"name":"Burpees HIIT","spec":"30s travail / 15s repos × 4","muscle":"cardio","series":4,"workSecs":30,"rest":15}]}`;
+    ?`Retourne ce JSON exactement (remplace les valeurs): {"coaching":"Ta phrase ici","exercises":[{"name":"Mobilite hanche","spec":"2x60 sec cercles lents","muscle":"glutes","series":2,"repsTarget":1,"rest":30},{"name":"Etirements dos","spec":"3x45 sec","muscle":"back","series":3,"repsTarget":1,"rest":30}]}`
+    :`Tu es coach sportif. Cree un entrainement ${dayScore>=7?'intense 50min':dayScore<=4?'leger 30min':'modere 40min'}.
+Profil: homme ${profile.age}ans ${profile.weight}kg, ingenieur, ${isHome?'home gym avec: '+equip:'gym commercial'}.
+Score jour: ${dayScore}/10. Fatigue: ${fatigue}/10. Stress: ${stress}/10. Charge: ${work}.
+Muscles prioritaires: ${freshMuscles||'tous'}. Muscles a eviter: ${tiredMuscles||'aucun'}.
+Retourne UNIQUEMENT ce JSON (6 a 8 exercices, pas de texte avant ou apres):
+{"coaching":"phrase motivante courte","exercises":[{"name":"Nom exercice","spec":"4x10 reps instruction courte","muscle":"back","series":4,"repsTarget":10,"rest":90}]}
+Pour HIIT ajoute workSecs au lieu de repsTarget: {"name":"Burpees","spec":"30s effort 15s repos","muscle":"cardio","series":4,"workSecs":30,"rest":15}`;
 
   try {
     const parsed=await callClaude(
@@ -855,13 +873,12 @@ async function generateNutrition(macros,profile,dayScore,work){
   $('nutri-out').innerHTML=`<div class="loading"><div class="spin"></div><div class="ldtxt">Calcul de tes macros et repas...</div></div>`;
 
   const nPrompt=`Nutritionniste sportif. Plan alimentaire du jour.
-MACROS: ${macros.protein}g protéines | ${macros.carbs}g glucides | ${macros.fat}g lipides | ${macros.targetCal} kcal.
-Profil: homme ${profile.age}ans, ${profile.weight}kg, ingénieur (assis + bureau debout), s'entraîne aujourd'hui.
-Charge: ${work}. Énergie: ${dayScore}/10. Aliments Montréal (IGA/Maxi/Costco).
-4 repas: 07h déjeuner, 12h dîner, 16h collation pré-workout, 19h30 souper post-workout.
-Quantités précises en grammes. Min 30g protéines/repas. Total = cibles exactes.
-JSON uniquement:
-{"meals":[{"time":"07h00","name":"nom","items":"Oeufs 3 (180g), Flocons avoine 80g","p":38,"c":65,"f":14,"kcal":546}],"tip":"conseil court"}`;
+Macros cibles: ${macros.protein}g proteines, ${macros.carbs}g glucides, ${macros.fat}g lipides, ${macros.targetCal} kcal.
+Homme ${profile.age}ans ${profile.weight}kg, ingenieur, s entraine aujourd hui. Charge: ${work}.
+4 repas: 07h dejeuner, 12h diner, 16h collation pre-workout, 19h30 souper post-workout.
+Aliments simples disponibles a Montreal. Quantites en grammes. Min 30g proteines par repas.
+Retourne UNIQUEMENT ce JSON (pas de texte autour):
+{"meals":[{"time":"07h00","name":"Nom repas","items":"Oeufs 3 (180g), Avoine 80g, Banane 120g","p":38,"c":65,"f":14,"kcal":546},{"time":"12h00","name":"Nom repas","items":"liste aliments","p":45,"c":55,"f":15,"kcal":539},{"time":"16h00","name":"Collation","items":"liste aliments","p":25,"c":35,"f":8,"kcal":308},{"time":"19h30","name":"Souper","items":"liste aliments","p":50,"c":45,"f":18,"kcal":542}],"tip":"conseil court"}`;
 
   try {
     const parsed=await callClaude(
